@@ -1,0 +1,9 @@
+[package]
+name = "bf_jit"
+version = "0.1.0"
+authors = ["Alex"]
+
+[dependencies]
+libc = "0.2.2"
+kernel32-sys = "0.2.2"
+winapi = "0.2"
