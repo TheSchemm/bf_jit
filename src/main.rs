@@ -4,7 +4,7 @@ extern crate libc;
 #[cfg(windows)] extern crate kernel32;
 #[cfg(windows)] extern crate winapi;
 
-use std::io::{Error, Cursor};
+use std::io::{Write, Error, ErrorKind, Cursor};
 use std::ops::{Index, IndexMut};
 
 
@@ -143,7 +143,22 @@ impl CodeBuff {
         self.pos = self.pos + std::mem::size_of::<T>() as isize;
     }
     
+    fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        
+        for b in buf {
+            if self.pos >= self.size as isize {
+                return Err(Error::new(ErrorKind::AddrNotAvailable, "Ran out of buffer room."));
+            }
+            unsafe { *self.buff.offset(self.pos) = *b; }
+            self.pos += 1;
+            
+        }
+        Ok(buf.len())
+    }
+    
 }
+
+
 
 
 impl Index<usize> for CodeBuff {
@@ -178,29 +193,6 @@ impl Drop for CodeBuff {
 }
 
 
-fn test(cb: &mut CodeBuff){
-
-    //mov rax, 0x3
-    cb.write::<u8>(0x48);
-    cb.write::<u8>(0xc7);
-    cb.write::<u8>(0xc0);
-    cb.write::<u32>(0x00000003);
-    //ret
-    cb.write::<u8>(0xc3);
-    
-    
-    
-    cb.protect(true, true);
-    for y in 0..4 {
-        for x in 0..16 {
-            print!("{:02x} ", cb[x+16*y]);
-        }
-        println!("");
-    }
-    let func = cb.get_function(0);
-    println!("Return value is: {}", func());
-}
-
 mod Emitter;
 
 use Emitter::x64;
@@ -208,20 +200,43 @@ fn main() {
     
     
     println!("Page size: 0x{:X}", CodeBuff::get_page_size());
-    let code_buff = CodeBuff::new(1);
-    match code_buff{
+    
+    let mut code_buff= match CodeBuff::new(1){
         Ok(mut cb)    => 
         {
             println!("Code buffer created.");
-            test(&mut cb);
-            
+            cb
         },
-        Err(err) => println!("Code buffer creation failed: {}", err),
-    }
+        Err(err) => panic!("Code buffer creation failed: {}", err),
+    };
     
     
     
     let e = Emitter::Emitter::new();
     
-    e.emit(x64::Opcode::Ret, x64::Operand::None);
+    //I haven't implemented any move yet. :c
+    
+    //mov rax, 0x3
+    code_buff.write::<u8>(0x48);
+    code_buff.write::<u8>(0xc7);
+    code_buff.write::<u8>(0xc0);
+    code_buff.write::<u32>(0x00000003);
+    
+    e.emit(x64::Opcode::Inc, x64::Operand::Register(x64::Register::Reg64(x64::Reg64::Rax)), &mut code_buff);
+    e.emit(x64::Opcode::Ret, x64::Operand::None, &mut code_buff);
+
+    
+    //turn on execution flag of memory (and leave write enabled (some OSes will not allow this))
+    code_buff.protect(true, true);
+    
+    
+    for y in 0..4 {
+        for x in 0..16 {
+            print!("{:02x} ", code_buff[x+16*y]);
+        }
+        println!("");
+    }
+    let func = code_buff.get_function(0);
+    println!("Return value is: {}", func());
 }
+
