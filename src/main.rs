@@ -1,4 +1,5 @@
 
+
 extern crate libc;
 
 #[cfg(windows)] extern crate kernel32;
@@ -6,7 +7,7 @@ extern crate libc;
 
 use std::io::{Write, Error, ErrorKind, Cursor};
 use std::ops::{Index, IndexMut};
-
+use std::marker::PhantomData;
 
 
 struct CodeBuff {
@@ -96,11 +97,26 @@ impl CodeBuff {
         }
     }
     
+    
+    
+    fn get_function1<RT, T1>(&self, offset: isize) -> fn(T1) -> RT {
+        unsafe {
+            std::mem::transmute(self.buff.offset(offset))
+        }
+    }
+    
+    
+    fn get_address(&self, offset:isize) -> usize {
+        unsafe {
+            std::mem::transmute(self.buff.offset(offset))
+        }
+    }
+    
     fn get_size(&self) -> u32 {
         self.size
     }
     
-    fn position(&self) -> isize {
+    pub fn position(&self) -> isize {
         self.pos
     }
     
@@ -196,8 +212,362 @@ impl Drop for CodeBuff {
 mod Emitter;
 
 use Emitter::x64;
-fn main() {
+
+
+mod bf {
+    use std::fs::File;
+    use std::io::prelude::*;
+    use std::io;
+    use std::collections::HashMap;
+    use std::fmt;
+    type CellType = u32;
     
+    #[derive(Eq, PartialEq, Debug, Copy, Clone)]
+    pub enum Opcode {
+        Ptr(i32),
+        Byte(i32),
+        LoopEnter(usize),
+        LoopExit(usize),
+        Out,
+        In,
+    }
+    
+    impl fmt::Display for Opcode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Opcode::Ptr(x)       => write!(f, "P({})", x),
+            Opcode::Byte(x)      => write!(f, "B({})", x),
+            Opcode::LoopEnter(x) => write!(f, "[({})", x),
+            Opcode::LoopExit(x)  => write!(f, "]({})", x),
+            Opcode::Out          => write!(f, "."),
+            Opcode::In           => write!(f, ","),
+        
+        
+        }
+    }
+}
+    
+    
+    pub struct OptimizedInterpreter {
+    
+        prog: Vec<Opcode>,
+        jmp_table: HashMap<usize, usize>,
+        mem:Vec<u32>,
+        mem_ptr: usize,
+        ip: usize,
+    }
+    
+    impl OptimizedInterpreter {
+        pub fn new() -> OptimizedInterpreter {
+            
+        
+            OptimizedInterpreter {mem: vec![0u32;30000], mem_ptr: 0, ip:0, prog: Vec::<Opcode>::new(), jmp_table: HashMap::<usize, usize>::new(),}
+        }
+    
+        pub fn print(&self) {
+            for op in &self.prog {
+                print!("{} ", op); 
+            }
+        
+        }
+        pub fn load(&mut self, f: &mut File) {
+        
+        
+            let mut s = String::new();
+            f.read_to_string(&mut s);
+            
+            let mut stack = Vec::<usize>::new();
+            
+            self.prog = Vec::<Opcode>::new();
+            
+            for cs in s.chars() {
+                match cs {
+                    '+' => {
+                        match self.prog.last() {
+                            Some(&Opcode::Byte(x)) => {
+                                let nx = x+1;
+                                self.prog.pop();
+                                self.prog.push(Opcode::Byte(nx));
+                            },
+                            
+                            _ => {
+                                self.prog.push(Opcode::Byte(1))
+                            },
+                        }
+                    }, 
+                    '-' => {
+                        match self.prog.last() {
+                            Some(&Opcode::Byte(x)) => {
+                                let nx = x-1;
+                                self.prog.pop();
+                                self.prog.push(Opcode::Byte(nx));
+                            },
+                            
+                            
+                            _ => {
+                                self.prog.push(Opcode::Byte(-1))
+                            },
+                        }
+                    },
+                    '<' => {
+                        match self.prog.last() {
+                            Some(&Opcode::Ptr(x)) => {
+                                let nx = x-1;
+                                self.prog.pop();
+                                self.prog.push(Opcode::Ptr(nx));
+                            },
+                            
+                            _ => {
+                                self.prog.push(Opcode::Ptr(-1))
+                            },
+                        }
+                    },
+                    '>' => {
+                        match self.prog.last() {
+                            Some(&Opcode::Ptr(x)) => {
+                                let nx = x+1;
+                                self.prog.pop();
+                                self.prog.push(Opcode::Ptr(nx));
+                            },
+                            
+                            _ => {
+                                self.prog.push(Opcode::Ptr(1))
+                            },
+                        }
+                    },
+                    '[' => {
+                        stack.push(self.prog.len());
+                        self.prog.push(Opcode::LoopEnter(0));
+                        
+                    
+                    },
+                    ']' => {
+                        match stack.pop() {
+                            Some(x) => {
+                                let i = self.prog.len();
+                                self.prog.push(Opcode::LoopExit(x));
+                                self.jmp_table.insert(i, x);
+                                self.jmp_table.insert(x, i);
+                                self.prog[x] = Opcode::LoopEnter(i);
+                            },
+                            None    => {
+                                    println!("Unbalanced brackets!");
+                                    break
+                                
+                                },
+                        }
+        
+                    }, 
+                    '.' => {
+                        self.prog.push(Opcode::Out);
+                    },
+                    ',' => {
+                        self.prog.push(Opcode::In);
+                    },
+                     _  => {},
+                }
+            }
+            
+            if stack.len() > 0 {
+                println!("Unbalanced brackets!");
+            }
+            
+        }
+    
+        pub fn run(&mut self) {
+            
+            while self.ip < self.prog.len() {
+                //println!("{} {} {}",self.ip, self.mem_ptr, self.prog[self.ip]);
+                match self.prog[self.ip]{
+                    //Some(x) => {
+                        
+                        //match x {
+                            Opcode::Ptr(x)       => {self.mem_ptr = self.mem_ptr.wrapping_add(x as usize);},
+                            Opcode::Byte(x)      => {self.mem[self.mem_ptr] = self.mem[self.mem_ptr].wrapping_add(x as u32);},
+                            
+                            
+                            Opcode::LoopEnter(x) => {
+                                    if self.mem[self.mem_ptr] == 0 {
+                                        self.ip = x;
+                                    }
+                                },
+                            Opcode::LoopExit(x)  => {
+                                    if self.mem[self.mem_ptr] != 0 {
+                                        self.ip = x;
+                                    }
+                                },
+                            Opcode::Out => {
+                                    io::stdout().write(&vec![self.mem[self.mem_ptr] as u8]);
+                                    io::stdout().flush();
+                                },
+                            Opcode::In => {
+                                   
+                                    let mut c:Vec<u8> = vec![0;1];
+                                    io::stdin().read_exact(&mut c);
+                                    self.mem[self.mem_ptr] = c[0] as u32;
+                                },
+                            
+                            
+                        //}
+                       
+                    
+                    //},
+
+                    //None => {break},
+                }
+                self.ip += 1;
+            
+            }
+        }
+    
+    
+    
+    }
+    
+    
+    
+    
+    
+    
+    
+    pub struct Interpreter {
+        mem:Vec<u32>,
+        mem_ptr: usize,
+        ip: usize,
+        prog: Vec<char>,
+        jmp_table: HashMap<usize, usize>,
+    }
+    
+    impl Interpreter {
+    
+        pub fn new() -> Interpreter {
+            Interpreter{mem: vec![0u32;30000], mem_ptr: 0, ip:0, prog:Vec::<char>::new(), jmp_table: HashMap::<usize,usize>::new()}
+        }
+        
+        pub fn load(&mut self, f: &mut File) {
+        
+        
+            let mut s = String::new();
+            f.read_to_string(&mut s);
+            
+            self.prog = Vec::<char>::new();
+            
+            for c in s.chars() {
+                match c {
+                    
+                        '+' | '-' | '<' | '>' | '[' | ']' | '.' | ',' => {
+                            self.prog.push(c);
+                        },
+                        _ => {},
+                }
+            
+            }
+            
+            
+            self.build_jmp_table();
+        }
+        
+        fn build_jmp_table(&mut self) -> Result<(), &'static str> {
+            let mut ci = self.prog.iter().enumerate();
+            
+            let mut stack = Vec::<usize>::new();
+            
+            loop {
+                match ci.next() {
+                    Some((i,&c)) => {
+                        match c {
+                            '[' => {
+                                    stack.push(i);
+                                },
+                            ']' => {
+                                    match stack.pop() {
+                                        Some(x) => {
+                                            self.jmp_table.insert(i, x);
+                                            self.jmp_table.insert(x, i);
+                                        },
+                                        None    => {
+                                                println!("Unbalanced brackets!");
+                                                break
+                                            
+                                            },
+                                    }
+                                },
+                             _  => {},
+                        
+                        }
+                    },
+                    None => { 
+                        if stack.len() > 0 {
+                            println!("Unbalanced brackets!");
+                        }
+                        break
+                    }
+                }
+            }
+            
+            
+            Ok(())
+        }
+        
+        
+        pub fn run(&mut self) {
+            
+            while self.ip < self.prog.len() {
+                
+                match self.prog[self.ip]{
+                    //Some(x) => {
+                        
+                        //match x {
+                            '+' => self.mem[self.mem_ptr] += 1,
+                            '-' => self.mem[self.mem_ptr] -= 1,
+                            '<' => self.mem_ptr -= 1,
+                            '>' => self.mem_ptr += 1,
+                            '[' => {
+                                    if self.mem[self.mem_ptr] == 0 {
+                                        self.ip = *self.jmp_table.get(&self.ip).unwrap();
+                                    }
+                                },
+                            ']' => {
+                                    if self.mem[self.mem_ptr] != 0 {
+                                        self.ip = *self.jmp_table.get(&self.ip).unwrap();
+                                    }
+                                },
+                            '.' => {
+                                    io::stdout().write(&vec![self.mem[self.mem_ptr] as u8]);
+                                    io::stdout().flush();
+                                },
+                            ',' => {
+                                   
+                                    let mut c:Vec<u8> = vec![0;1];
+                                    io::stdin().read_exact(&mut c);
+                                    self.mem[self.mem_ptr] = c[0] as u32;
+                                },
+                            _ => {},
+                            
+                        //}
+                       
+                    
+                    //},
+
+                    //None => {break},
+                }
+                self.ip += 1;
+            
+            }
+        }
+        
+    
+    
+    }
+
+
+
+
+}
+
+
+fn test_emitter() {
+    let b = 24u8;
     
     println!("Page size: 0x{:X}", CodeBuff::get_page_size());
     
@@ -215,16 +585,42 @@ fn main() {
     let e = Emitter::Emitter::new();
     
     //I haven't implemented any move yet. :c
-    
+    /*
     //mov rax, 0x3
     code_buff.write::<u8>(0x48);
     code_buff.write::<u8>(0xc7);
     code_buff.write::<u8>(0xc0);
     code_buff.write::<u32>(0x00000003);
-    
+    */
+    e.emit(x64::Opcode::Mov, x64::Operand::Reg64Reg64{d: x64::Reg64::Rax, s: x64::Reg64::Rax}, &mut code_buff);
+    e.emit(x64::Opcode::Mov, x64::Operand::Reg64Reg64{d: x64::Reg64::Rcx, s: x64::Reg64::Rax}, &mut code_buff);
+    e.emit(x64::Opcode::Mov, x64::Operand::Reg64Reg64{d: x64::Reg64::Rax, s: x64::Reg64::Rcx}, &mut code_buff);
+    e.emit(x64::Opcode::Mov, x64::Operand::Reg64Imm32{r: x64::Reg64::Rax, i: 3}, &mut code_buff);
     e.emit(x64::Opcode::Inc, x64::Operand::Register(x64::Register::Reg64(x64::Reg64::Rax)), &mut code_buff);
     e.emit(x64::Opcode::Ret, x64::Operand::None, &mut code_buff);
 
+    
+    
+    
+    let  mut pos = code_buff.position();
+    let addr = code_buff.get_address(pos);
+    
+    println!("{:08x} {:08x}", pos, addr);
+    
+    //ehco function
+    
+    e.emit(x64::Opcode::Mov, x64::Operand::Reg64Reg64{d: x64::Reg64::Rax, s:Emitter::Emitter::ArgReg(0)}, &mut code_buff);
+    e.emit(x64::Opcode::Ret, x64::Operand::None, &mut code_buff);
+    
+    let echo_fn = code_buff.get_function1::<u32,u32>(pos);
+    
+    
+    let  mut pos = code_buff.position();
+    
+    e.emit(x64::Opcode::Inc, x64::Operand::BytePtr(Emitter::Emitter::ArgReg(0)), &mut code_buff);
+    e.emit(x64::Opcode::Ret, x64::Operand::None, &mut code_buff);
+    
+    let inc_byte_by_ptr = code_buff.get_function1::<(),&u8>(pos);
     
     //turn on execution flag of memory (and leave write enabled (some OSes will not allow this))
     code_buff.protect(true, true);
@@ -238,5 +634,50 @@ fn main() {
     }
     let func = code_buff.get_function(0);
     println!("Return value is: {}", func());
+    
+    
+    println!("echo_fn(1): {}", echo_fn(1));
+    println!("echo_fn(42): {}", echo_fn(42));
+    
+    
+    
+    println!("byte before: {} ", b);
+    
+    inc_byte_by_ptr(&b);
+    
+    println!("byte after: {} ", b);
+
+}
+
+use std::fs::File;
+
+fn test_interpreter(){
+    let mut f = File::open("mandelbrot.bf.txt").unwrap();
+    let mut b = bf::Interpreter::new();
+    b.load(&mut f);
+    b.run();
+}
+
+
+fn test_optimized_interpreter(){
+    let mut f = File::open("mandelbrot.bf.txt").unwrap();
+    let mut b = bf::OptimizedInterpreter::new();
+    b.load(&mut f);
+    //b.print();
+    b.run();
+}
+extern crate time;
+use time::{Duration, PreciseTime};
+//Duration: PT1400.233456298S
+fn main() {
+
+
+    //test_optimized_interpreter();
+    let start = PreciseTime::now();
+    test_optimized_interpreter();
+    
+    let end = PreciseTime::now();
+    println!("Duration: {}", start.to(end));
+    
 }
 
